@@ -36,15 +36,13 @@ sql = "SELECT * FROM `logistics-449115.lastmile.supplyAcquisition`"
 print("BigQueryから仕入データを取得中...")
 df = client.query(sql).to_dataframe()
 
-# スキーマに基づき、I列(unitOfQuantity)を基準単位列として指定
-# Pythonのインデックスは0から始まるため、I列は8番目
+# スキーマに基づき、unitOfQuantity(I列)を使用
 unit_col = "unitOfQuantity" 
-print(f"基準単位として '{unit_col}' を使用します。")
 
 df['invoiceDate_parsed'] = pd.to_datetime(df['invoiceDate'].astype(str), format='%Y%m%d', errors='coerce')
 max_date = df['invoiceDate_parsed'].max()
 
-# 直近14日間の有効データ
+# 直近14日間のデータ
 df_all = df[
     (df['invoiceDate_parsed'] >= max_date - timedelta(days=14)) &
     (df['unitPrice'] > 0) &
@@ -65,9 +63,9 @@ def judge_trend(item_code):
     return 'UP' if short > overall else 'DOWN' if short < overall else 'FLAT'
 
 # ============================================================
-# 12. ワイド形式作成（最高単価のunitOfQuantityを基準に検索）
+# 12. ワイド形式作成（商品コード順に並べ替えを追加）
 # ============================================================
-print("最高単価の単位(unitOfQuantity)を基準に集計中...")
+print("データを集計中...")
 result_rows = []
 item_codes = df_all['itemCode'].unique()
 
@@ -75,17 +73,14 @@ for code in item_codes:
     item_df = df_all[df_all['itemCode'] == code]
     if item_df.empty: continue
     
-    # 1. 最高単価を記録した行を特定（最新日優先）
+    # 最高単価を基準に特定
     high_row = item_df.sort_values(['unitPrice', 'invoiceDate_parsed'], ascending=[False, False]).iloc[0]
     high_price = high_row['unitPrice']
     high_date = high_row['invoiceDate_parsed'].strftime('%Y/%m/%d')
-    
-    # 最高値の時の単位（例: 'cs'）を取得
     base_unit = high_row[unit_col]
     
-    # 2. 同じ単位（unitOfQuantity）の中で最低単価を検索
+    # 同じ単位の中で最低単価を検索
     same_unit_df = item_df[item_df[unit_col] == base_unit]
-    
     if not same_unit_df.empty:
         low_row = same_unit_df.sort_values(['unitPrice', 'invoiceDate_parsed'], ascending=[True, False]).iloc[0]
     else:
@@ -97,7 +92,7 @@ for code in item_codes:
     row = {
         '商品コード': code,
         '商品名': item_df['itemName'].iloc[0],
-        '仕入れ単位': f"{base_unit}", # cs, kgなどの単位を表示
+        '仕入れ単位': f"{base_unit}",
         '最高単価日': high_date,
         '最高単価': int(high_price),
         '最安単価日': low_date,
@@ -120,9 +115,16 @@ for code in item_codes:
         row[f'仕入先{rank}_取引回数'] = int(s['cnt'])
     result_rows.append(row)
 
-result = pd.DataFrame(result_rows).fillna('')
+# データフレーム作成
+result = pd.DataFrame(result_rows)
+
+# ★ ここで商品コード(A列相当)で昇順に並べ替え ★
+result = result.sort_values('商品コード').fillna('')
+
+# 列の並びを整理
 base_cols = ['商品コード', '商品名', '仕入れ単位', '最高単価日', '最高単価', '最安単価日', '最安単価', '平均単価', '短期トレンド']
-result = result[base_cols + sorted([c for c in result.columns if c.startswith('仕入先')])]
+supplier_cols = sorted([c for c in result.columns if c.startswith('仕入先')])
+result = result[base_cols + supplier_cols]
 
 # ============================================================
 # 14. Google Sheets 出力
@@ -149,4 +151,4 @@ requests = [
                        "left": {"style": "SOLID_MEDIUM", "width": 2}, "right": {"style": "SOLID_MEDIUM", "width": 2}}}
 ]
 sh.batch_update({'requests': requests})
-print("✅ スキーマに基づき、unitOfQuantity(I列)を基準に最高・最安を特定しました。")
+print("✅ 商品コード順に並べ替えて更新を完了しました。")
