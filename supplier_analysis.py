@@ -9,16 +9,13 @@ import os
 import json
 
 # ============================================================
-# 1. 認証設定(GitHub Secretsから取得)
+# 1. 認証設定
 # ============================================================
 env_key = os.getenv("GCP_SA_KEY")
-
 if not env_key:
     raise ValueError("GCP_SA_KEY is not set")
 
 info = json.loads(env_key)
-
-# 鍵の種類を自動判別
 if "service_account" in info.get("type", ""):
     creds = service_account.Credentials.from_service_account_info(info, scopes=[
         'https://www.googleapis.com/auth/spreadsheets',
@@ -45,200 +42,103 @@ today = pd.Timestamp(datetime.now() + timedelta(hours=9)).normalize()
 # ============================================================
 # 3. BigQueryからデータ取得
 # ============================================================
-sql = """
-SELECT *
-FROM `logistics-449115.lastmile.supplyAcquisition`
-"""
+sql = "SELECT * FROM `logistics-449115.lastmile.supplyAcquisition`"
 print("BigQueryから仕入データを取得中...")
 df = client.query(sql).to_dataframe()
 
-# ============================================================
-# 4. 日付パース
-# ============================================================
-df['invoiceDate_parsed'] = pd.to_datetime(
-    df['invoiceDate'].astype(str),
-    format='%Y%m%d',
-    errors='coerce'
-)
-
+df['invoiceDate_parsed'] = pd.to_datetime(df['invoiceDate'].astype(str), format='%Y%m%d', errors='coerce')
 max_date = df['invoiceDate_parsed'].max()
 
 # ============================================================
-# 5. 直近2週間フィルタ
+# 5. データフィルタ & 仕入れ単位統一
 # ============================================================
 df_2weeks = df[
     (df['invoiceDate_parsed'] >= max_date - timedelta(days=14)) &
-    (df['unitPrice'] > 0) &
-    (df['kgAmount'] > 0) &
-    (df['itemCode'].notna()) &
-    (df['itemCode'].astype(str) != '') &
-    (df['supplierName1'].notna()) &
-    (df['supplierName1'] != '')
+    (df['unitPrice'] > 0) & (df['kgAmount'] > 0) &
+    (df['itemCode'].notna()) & (df['itemCode'].astype(str) != '') &
+    (df['supplierName1'].notna()) & (df['supplierName1'] != '')
 ].copy()
 
-df_2weeks = df_2weeks[np.isfinite(df_2weeks['unitPrice'])]
-
-print(f"📦 抽出データ件数（2週間）: {len(df_2weeks)}件")
-
-# ============================================================
-# 6. 商品ごとの標準仕入れ単位（最頻値）
-# ============================================================
 standard_unit_map = (
-    df_2weeks
-    .groupby('itemCode')['kgAmount']
+    df_2weeks.groupby('itemCode')['kgAmount']
     .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0])
     .to_dict()
 )
-
 df_2weeks['standard_unit'] = df_2weeks['itemCode'].map(standard_unit_map)
 df_2weeks = df_2weeks[df_2weeks['kgAmount'] == df_2weeks['standard_unit']].copy()
 
-print(f"📐 仕入単位統一後件数: {len(df_2weeks)}件")
-
 # ============================================================
-# 7. 商品マスタ情報
-# ============================================================
-item_info = (
-    df_2weeks
-    .groupby('itemCode')
-    .agg({
-        'itemName': 'first',
-        'standard_unit': 'first'
-    })
-    .reset_index()
-)
-
-# ============================================================
-# 8. 単価集計（全体 / 短期）
+# 8-11. 単価統計・トレンド計算
 # ============================================================
 overall_avg = df_2weeks.groupby('itemCode')['unitPrice'].mean().round(0)
-
-df_short = df_2weeks[
-    df_2weeks['invoiceDate_parsed'] >= max_date - timedelta(days=7)
-]
+df_short = df_2weeks[df_2weeks['invoiceDate_parsed'] >= max_date - timedelta(days=7)]
 short_avg = df_short.groupby('itemCode')['unitPrice'].mean().round(0)
 
-# ============================================================
-# 9. 短期トレンド判定
-# ============================================================
 def judge_trend(item_code):
     overall = overall_avg.get(item_code)
     short = short_avg.get(item_code)
+    if overall is None or short is None: return 'FLAT'
+    if short > overall: return 'UP'
+    elif short < overall: return 'DOWN'
+    else: return 'FLAT'
 
-    if overall is None or short is None:
-        return 'FLAT'
-
-    if short > overall:
-        return 'UP'
-    elif short < overall:
-        return 'DOWN'
-    else:
-        return 'FLAT'
-
-# ============================================================
-# 10. サプライヤー別 単価統計
-# ============================================================
 supplier_stats = (
-    df_2weeks
-    .groupby(['itemCode', 'supplierName1'])
-    .agg(
-        max_unit_price=('unitPrice', 'max'),
-        min_unit_price=('unitPrice', 'min'),
-        avg_unit_price=('unitPrice', 'mean'),
-        sample_count=('unitPrice', 'count')
-    )
-    .round(0)
-    .reset_index()
+    df_2weeks.groupby(['itemCode', 'supplierName1'])
+    .agg(max_unit_price=('unitPrice', 'max'), min_unit_price=('unitPrice', 'min'),
+         avg_unit_price=('unitPrice', 'mean'), sample_count=('unitPrice', 'count'))
+    .round(0).reset_index()
 )
-
-supplier_stats = supplier_stats[
-    np.isfinite(supplier_stats['avg_unit_price'])
-]
-
-supplier_stats = supplier_stats.sort_values(
-    ['itemCode', 'avg_unit_price']
-)
+supplier_stats = supplier_stats.sort_values(['itemCode', 'avg_unit_price'])
 
 # ============================================================
-# 11. 商品別 全体最高・最安単価
+# 12. ワイド形式作成（日付列を独立して追加）
 # ============================================================
-overall_highest = df_2weeks.groupby('itemCode')['unitPrice'].max().round(0)
-overall_lowest = df_2weeks.groupby('itemCode')['unitPrice'].min().round(0)
-
-# ============================================================
-# 12. ワイド形式作成
-# ============================================================
-print("ワイド形式でデータを作成中...")
+print("日付列を分離したワイド形式でデータを作成中...")
 result_rows = []
+item_info = df_2weeks.groupby('itemCode').agg({'itemName': 'first', 'standard_unit': 'first'}).reset_index()
 
 for _, item in item_info.iterrows():
     item_code = item['itemCode']
-    item_name = item['itemName']
-    unit = item['standard_unit']
+    item_df = df_2weeks[df_2weeks['itemCode'] == item_code]
+    
+    if item_df.empty: continue
 
-    suppliers = supplier_stats[
-        supplier_stats['itemCode'] == item_code
-    ].reset_index(drop=True)
-
-    if suppliers.empty:
-        continue
-
-    overall = overall_avg.get(item_code)
-    highest = overall_highest.get(item_code)
-    lowest = overall_lowest.get(item_code)
-
-    if not np.isfinite(overall):
-        continue
+    highest_price = item_df['unitPrice'].max()
+    highest_date = item_df[item_df['unitPrice'] == highest_price]['invoiceDate_parsed'].max().strftime('%Y/%m/%d')
+    lowest_price = item_df['unitPrice'].min()
+    lowest_date = item_df[item_df['unitPrice'] == lowest_price]['invoiceDate_parsed'].max().strftime('%Y/%m/%d')
 
     row = {
         '商品コード': item_code,
-        '商品名': item_name,
-        '仕入れ単位': f'{unit}kg',
-        '最高単価': int(highest),
-        '最安単価': int(lowest),
-        '平均単価': int(overall),
+        '商品名': item_name := item['itemName'],
+        '仕入れ単位': f"{item['standard_unit']}kg",
+        '最高単価': int(highest_price),
+        '最高単価日': highest_date,
+        '最安単価': int(lowest_price),
+        '最安単価日': lowest_date,
+        '平均単価': int(overall_avg.get(item_code, 0)),
         '短期トレンド': judge_trend(item_code)
     }
 
+    suppliers = supplier_stats[supplier_stats['itemCode'] == item_code].reset_index(drop=True)
     for idx, s in suppliers.iterrows():
         rank = idx + 1
         row[f'仕入先{rank}'] = s['supplierName1']
-        row[f'仕入先{rank}_単価'] = (
-            f"{int(s['max_unit_price'])}/"
-            f"{int(s['min_unit_price'])}："
-            f"{int(s['avg_unit_price'])}"
-        )
+        row[f'仕入先{rank}_単価'] = f"{int(s['max_unit_price'])}/{int(s['min_unit_price'])}：{int(s['avg_unit_price'])}"
         row[f'仕入先{rank}_取引回数'] = int(s['sample_count'])
-
     result_rows.append(row)
 
 result = pd.DataFrame(result_rows).fillna('')
-
-# ============================================================
-# 13. 集計期間
-# ============================================================
 start_date = df_2weeks['invoiceDate_parsed'].min().strftime('%Y/%m/%d')
 end_date = df_2weeks['invoiceDate_parsed'].max().strftime('%Y/%m/%d')
-
 result['集計期間'] = f'{start_date} - {end_date}'
 
-base_cols = [
-    '商品コード', '商品名', '仕入れ単位',
-    '最高単価', '最安単価', '平均単価',
-    '短期トレンド', '集計期間'
-]
-
-supplier_cols = sorted(
-    [c for c in result.columns if c.startswith('仕入先')]
-)
-
+base_cols = ['商品コード', '商品名', '仕入れ単位', '最高単価', '最高単価日', '最安単価', '最安単価日', '平均単価', '短期トレンド', '集計期間']
+supplier_cols = sorted([c for c in result.columns if c.startswith('仕入先')])
 result = result[base_cols + supplier_cols]
 
-print(f"📊 完成データ件数: {len(result)}件")
-print(f"📅 集計期間: {start_date} - {end_date}")
-
 # ============================================================
-# 14. Google Sheets 出力
+# 14. Google Sheets 出力 & 書式設定
 # ============================================================
 print("スプレッドシートを更新中...")
 sh = gc.open_by_key(SPREADSHEET_ID)
@@ -247,18 +147,31 @@ sheet_name = '仕入先分析_単価'
 try:
     worksheet = sh.worksheet(sheet_name)
 except gspread.exceptions.WorksheetNotFound:
-    worksheet = sh.add_worksheet(
-        title=sheet_name,
-        rows=1000,
-        cols=60
-    )
+    worksheet = sh.add_worksheet(title=sheet_name, rows=1000, cols=60)
 
 worksheet.clear()
-worksheet.update(
-    [result.columns.tolist()] + result.values.tolist(),
-    value_input_option='RAW'
-)
+worksheet.update([result.columns.tolist()] + result.values.tolist(), value_input_option='RAW')
 
-print("✅ Google Sheets出力完了")
-print(f"🔗 https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")
-print("すべての更新処理が完了しました。")
+# --- 枠線・書式の設定 ---
+sheet_id = worksheet.id
+num_rows, num_cols = result.shape
+total_rows = num_rows + 1
+high_idx = result.columns.get_loc('最高単価')
+low_idx = result.columns.get_loc('最安単価日') # 日付列まで含める
+
+requests = [
+    # 全体に細い格子
+    {"updateBorders": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": total_rows, "startColumnIndex": 0, "endColumnIndex": num_cols},
+                       "top": {"style": "SOLID", "width": 1}, "bottom": {"style": "SOLID", "width": 1},
+                       "left": {"style": "SOLID", "width": 1}, "right": {"style": "SOLID", "width": 1},
+                       "innerHorizontal": {"style": "SOLID", "width": 1}, "innerVertical": {"style": "SOLID", "width": 1}}},
+    # ヘッダー装飾
+    {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": num_cols},
+                    "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}, "textFormat": {"bold": True}}}, "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
+    # 最高・最安エリアの強調（太枠）
+    {"updateBorders": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": total_rows, "startColumnIndex": high_idx, "endColumnIndex": low_idx + 1},
+                       "left": {"style": "SOLID_MEDIUM", "width": 2}, "right": {"style": "SOLID_MEDIUM", "width": 2}}}
+]
+sh.batch_update({'requests': requests})
+
+print("✅ すべての処理が完了しました。")
