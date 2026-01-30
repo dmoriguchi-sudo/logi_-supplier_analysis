@@ -27,7 +27,6 @@ client = bigquery.Client(credentials=creds, project='logistics-449115')
 # ============================================================
 # 2. 基本設定
 # ============================================================
-PROJECT_ID = 'logistics-449115'
 SPREADSHEET_ID = '1w-Kknr-Or8zwpL8SUmnhsev-mrHuDr2YLhAzjDVRh-4'
 
 # ============================================================
@@ -37,14 +36,15 @@ sql = "SELECT * FROM `logistics-449115.lastmile.supplyAcquisition`"
 print("BigQueryから仕入データを取得中...")
 df = client.query(sql).to_dataframe()
 
-# I列（インデックス8）を単位列として認識
-unit_col_name = df.columns[8] 
-print(f"単位列として '{unit_col_name}' (I列) を使用します。")
+# スキーマに基づき、I列(unitOfQuantity)を基準単位列として指定
+# Pythonのインデックスは0から始まるため、I列は8番目
+unit_col = "unitOfQuantity" 
+print(f"基準単位として '{unit_col}' を使用します。")
 
 df['invoiceDate_parsed'] = pd.to_datetime(df['invoiceDate'].astype(str), format='%Y%m%d', errors='coerce')
 max_date = df['invoiceDate_parsed'].max()
 
-# 過去14日間の有効データ
+# 直近14日間の有効データ
 df_all = df[
     (df['invoiceDate_parsed'] >= max_date - timedelta(days=14)) &
     (df['unitPrice'] > 0) &
@@ -65,9 +65,9 @@ def judge_trend(item_code):
     return 'UP' if short > overall else 'DOWN' if short < overall else 'FLAT'
 
 # ============================================================
-# 12. ワイド形式作成（最高価格の単位に従って検索）
+# 12. ワイド形式作成（最高単価のunitOfQuantityを基準に検索）
 # ============================================================
-print("最高単価の単位を基準に集計中...")
+print("最高単価の単位(unitOfQuantity)を基準に集計中...")
 result_rows = []
 item_codes = df_all['itemCode'].unique()
 
@@ -75,20 +75,21 @@ for code in item_codes:
     item_df = df_all[df_all['itemCode'] == code]
     if item_df.empty: continue
     
-    # 1. 最高単価を記録した行を特定
+    # 1. 最高単価を記録した行を特定（最新日優先）
     high_row = item_df.sort_values(['unitPrice', 'invoiceDate_parsed'], ascending=[False, False]).iloc[0]
     high_price = high_row['unitPrice']
     high_date = high_row['invoiceDate_parsed'].strftime('%Y/%m/%d')
-    base_unit = high_row[unit_col_name]
     
-    # 2. 最高単価と同じ単位の中で最低単価を検索
-    same_unit_df = item_df[item_df[unit_col_name] == base_unit]
+    # 最高値の時の単位（例: 'cs'）を取得
+    base_unit = high_row[unit_col]
     
-    # 万が一、同じ単位のデータが取得できない場合のガードレール
+    # 2. 同じ単位（unitOfQuantity）の中で最低単価を検索
+    same_unit_df = item_df[item_df[unit_col] == base_unit]
+    
     if not same_unit_df.empty:
         low_row = same_unit_df.sort_values(['unitPrice', 'invoiceDate_parsed'], ascending=[True, False]).iloc[0]
     else:
-        low_row = high_row # 同じ単位が他になければ最高値＝最低値とする
+        low_row = high_row
     
     low_price = low_row['unitPrice']
     low_date = low_row['invoiceDate_parsed'].strftime('%Y/%m/%d')
@@ -96,7 +97,7 @@ for code in item_codes:
     row = {
         '商品コード': code,
         '商品名': item_df['itemName'].iloc[0],
-        '仕入れ単位': f"{base_unit}",
+        '仕入れ単位': f"{base_unit}", # cs, kgなどの単位を表示
         '最高単価日': high_date,
         '最高単価': int(high_price),
         '最安単価日': low_date,
@@ -105,7 +106,7 @@ for code in item_codes:
         '短期トレンド': judge_trend(code)
     }
 
-    # サプライヤー別統計
+    # 仕入先別統計
     suppliers = (
         item_df.groupby('supplierName1')
         .agg(max_p=('unitPrice', 'max'), min_p=('unitPrice', 'min'), avg_p=('unitPrice', 'mean'), cnt=('unitPrice', 'count'))
@@ -131,7 +132,7 @@ worksheet = sh.worksheet('仕入先分析_単価')
 worksheet.clear()
 worksheet.update([result.columns.tolist()] + result.values.tolist(), value_input_option='RAW')
 
-# 書式設定（格子と強調枠）
+# 書式設定（枠線・ヘッダー固定）
 sheet_id = worksheet.id
 num_rows, num_cols = result.shape
 high_idx = result.columns.get_loc('最高単価日')
@@ -148,4 +149,4 @@ requests = [
                        "left": {"style": "SOLID_MEDIUM", "width": 2}, "right": {"style": "SOLID_MEDIUM", "width": 2}}}
 ]
 sh.batch_update({'requests': requests})
-print("✅ 完了しました。")
+print("✅ スキーマに基づき、unitOfQuantity(I列)を基準に最高・最安を特定しました。")
