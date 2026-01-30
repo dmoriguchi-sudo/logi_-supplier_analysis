@@ -94,9 +94,9 @@ supplier_stats = (
 supplier_stats = supplier_stats.sort_values(['itemCode', 'avg_unit_price'])
 
 # ============================================================
-# 12. ワイド形式作成（日付列を独立して追加）
+# 12. ワイド形式作成（日付を前に配置 & 最新日取得）
 # ============================================================
-print("日付列を分離したワイド形式でデータを作成中...")
+print("日付を前に配置したワイド形式でデータを作成中...")
 result_rows = []
 item_info = df_2weeks.groupby('itemCode').agg({'itemName': 'first', 'standard_unit': 'first'}).reset_index()
 
@@ -106,9 +106,11 @@ for _, item in item_info.iterrows():
     
     if item_df.empty: continue
 
-    # 最高・最安とその発生日
+    # 最高単価とその直近発生日
     highest_price = item_df['unitPrice'].max()
     highest_date = item_df[item_df['unitPrice'] == highest_price]['invoiceDate_parsed'].max().strftime('%Y/%m/%d')
+    
+    # 最安単価とその直近発生日
     lowest_price = item_df['unitPrice'].min()
     lowest_date = item_df[item_df['unitPrice'] == lowest_price]['invoiceDate_parsed'].max().strftime('%Y/%m/%d')
 
@@ -116,15 +118,14 @@ for _, item in item_info.iterrows():
         '商品コード': item_code,
         '商品名': item['itemName'],
         '仕入れ単位': f"{item['standard_unit']}kg",
+        '最高単価日': highest_date, # 日付を前に
         '最高単価': int(highest_price),
-        '最高単価日': highest_date,
+        '最安単価日': lowest_date, # 日付を前に
         '最安単価': int(lowest_price),
-        '最安単価日': lowest_date,
         '平均単価': int(overall_avg.get(item_code, 0)),
         '短期トレンド': judge_trend(item_code)
     }
 
-    # 仕入先列の追加
     suppliers = supplier_stats[supplier_stats['itemCode'] == item_code].reset_index(drop=True)
     for idx, s in suppliers.iterrows():
         rank = idx + 1
@@ -135,12 +136,12 @@ for _, item in item_info.iterrows():
 
 result = pd.DataFrame(result_rows).fillna('')
 
-# 並び順の整理
+# 列順の定義
 start_date = df_2weeks['invoiceDate_parsed'].min().strftime('%Y/%m/%d')
 end_date = df_2weeks['invoiceDate_parsed'].max().strftime('%Y/%m/%d')
 result['集計期間'] = f'{start_date} - {end_date}'
 
-base_cols = ['商品コード', '商品名', '仕入れ単位', '最高単価', '最高単価日', '最安単価', '最安単価日', '平均単価', '短期トレンド', '集計期間']
+base_cols = ['商品コード', '商品名', '仕入れ単位', '最高単価日', '最高単価', '最安単価日', '最安単価', '平均単価', '短期トレンド', '集計期間']
 supplier_cols = sorted([c for c in result.columns if c.startswith('仕入先')])
 result = result[base_cols + supplier_cols]
 
@@ -159,24 +160,24 @@ except gspread.exceptions.WorksheetNotFound:
 worksheet.clear()
 worksheet.update([result.columns.tolist()] + result.values.tolist(), value_input_option='RAW')
 
-# 書式設定（枠線）
+# 書式設定
 sheet_id = worksheet.id
 num_rows, num_cols = result.shape
 total_rows = num_rows + 1
-high_idx = result.columns.get_loc('最高単価')
-low_date_idx = result.columns.get_loc('最安単価日')
+high_date_idx = result.columns.get_loc('最高単価日')
+low_price_idx = result.columns.get_loc('最安単価')
 
 requests = [
-    # 1. 全体に格子
+    # 全体に格子
     {"updateBorders": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": total_rows, "startColumnIndex": 0, "endColumnIndex": num_cols},
                        "top": {"style": "SOLID", "width": 1}, "bottom": {"style": "SOLID", "width": 1},
                        "left": {"style": "SOLID", "width": 1}, "right": {"style": "SOLID", "width": 1},
                        "innerHorizontal": {"style": "SOLID", "width": 1}, "innerVertical": {"style": "SOLID", "width": 1}}},
-    # 2. ヘッダー装飾
+    # ヘッダー
     {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": num_cols},
                     "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}, "textFormat": {"bold": True}, "horizontalAlignment": "CENTER"}}, "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)"}},
-    # 3. 最高単価〜最安単価日の4列を太枠で囲む
-    {"updateBorders": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": total_rows, "startColumnIndex": high_idx, "endColumnIndex": low_date_idx + 1},
+    # 最高〜最安エリアの強調（太枠）
+    {"updateBorders": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": total_rows, "startColumnIndex": high_date_idx, "endColumnIndex": low_price_idx + 1},
                        "left": {"style": "SOLID_MEDIUM", "width": 2}, "right": {"style": "SOLID_MEDIUM", "width": 2}}}
 ]
 
