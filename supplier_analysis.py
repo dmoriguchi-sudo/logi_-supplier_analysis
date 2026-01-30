@@ -37,7 +37,6 @@ client = bigquery.Client(credentials=creds, project='logistics-449115')
 # ============================================================
 PROJECT_ID = 'logistics-449115'
 SPREADSHEET_ID = '1w-Kknr-Or8zwpL8SUmnhsev-mrHuDr2YLhAzjDVRh-4'
-today = pd.Timestamp(datetime.now() + timedelta(hours=9)).normalize()
 
 # ============================================================
 # 3. BigQueryからデータ取得
@@ -58,6 +57,10 @@ df_2weeks = df[
     (df['itemCode'].notna()) & (df['itemCode'].astype(str) != '') &
     (df['supplierName1'].notna()) & (df['supplierName1'] != '')
 ].copy()
+
+if df_2weeks.empty:
+    print("表示対象のデータがありませんでした。")
+    exit()
 
 standard_unit_map = (
     df_2weeks.groupby('itemCode')['kgAmount']
@@ -103,6 +106,7 @@ for _, item in item_info.iterrows():
     
     if item_df.empty: continue
 
+    # 最高・最安とその発生日
     highest_price = item_df['unitPrice'].max()
     highest_date = item_df[item_df['unitPrice'] == highest_price]['invoiceDate_parsed'].max().strftime('%Y/%m/%d')
     lowest_price = item_df['unitPrice'].min()
@@ -110,7 +114,7 @@ for _, item in item_info.iterrows():
 
     row = {
         '商品コード': item_code,
-        '商品名': item_name := item['itemName'],
+        '商品名': item['itemName'],
         '仕入れ単位': f"{item['standard_unit']}kg",
         '最高単価': int(highest_price),
         '最高単価日': highest_date,
@@ -120,6 +124,7 @@ for _, item in item_info.iterrows():
         '短期トレンド': judge_trend(item_code)
     }
 
+    # 仕入先列の追加
     suppliers = supplier_stats[supplier_stats['itemCode'] == item_code].reset_index(drop=True)
     for idx, s in suppliers.iterrows():
         rank = idx + 1
@@ -129,6 +134,8 @@ for _, item in item_info.iterrows():
     result_rows.append(row)
 
 result = pd.DataFrame(result_rows).fillna('')
+
+# 並び順の整理
 start_date = df_2weeks['invoiceDate_parsed'].min().strftime('%Y/%m/%d')
 end_date = df_2weeks['invoiceDate_parsed'].max().strftime('%Y/%m/%d')
 result['集計期間'] = f'{start_date} - {end_date}'
@@ -152,26 +159,26 @@ except gspread.exceptions.WorksheetNotFound:
 worksheet.clear()
 worksheet.update([result.columns.tolist()] + result.values.tolist(), value_input_option='RAW')
 
-# --- 枠線・書式の設定 ---
+# 書式設定（枠線）
 sheet_id = worksheet.id
 num_rows, num_cols = result.shape
 total_rows = num_rows + 1
 high_idx = result.columns.get_loc('最高単価')
-low_idx = result.columns.get_loc('最安単価日') # 日付列まで含める
+low_date_idx = result.columns.get_loc('最安単価日')
 
 requests = [
-    # 全体に細い格子
+    # 1. 全体に格子
     {"updateBorders": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": total_rows, "startColumnIndex": 0, "endColumnIndex": num_cols},
                        "top": {"style": "SOLID", "width": 1}, "bottom": {"style": "SOLID", "width": 1},
                        "left": {"style": "SOLID", "width": 1}, "right": {"style": "SOLID", "width": 1},
                        "innerHorizontal": {"style": "SOLID", "width": 1}, "innerVertical": {"style": "SOLID", "width": 1}}},
-    # ヘッダー装飾
+    # 2. ヘッダー装飾
     {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": num_cols},
-                    "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}, "textFormat": {"bold": True}}}, "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
-    # 最高・最安エリアの強調（太枠）
-    {"updateBorders": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": total_rows, "startColumnIndex": high_idx, "endColumnIndex": low_idx + 1},
+                    "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}, "textFormat": {"bold": True}, "horizontalAlignment": "CENTER"}}, "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)"}},
+    # 3. 最高単価〜最安単価日の4列を太枠で囲む
+    {"updateBorders": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": total_rows, "startColumnIndex": high_idx, "endColumnIndex": low_date_idx + 1},
                        "left": {"style": "SOLID_MEDIUM", "width": 2}, "right": {"style": "SOLID_MEDIUM", "width": 2}}}
 ]
-sh.batch_update({'requests': requests})
 
+sh.batch_update({'requests': requests})
 print("✅ すべての処理が完了しました。")
