@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import gspread
+from gspread_dataframe import set_with_dataframe
 from google.oauth2 import service_account
 from google.cloud import bigquery
 from datetime import datetime, timedelta
@@ -131,11 +132,12 @@ result = result[base_cols + supplier_cols]
 # ============================================================
 sh = gc.open_by_key(SPREADSHEET_ID)
 worksheet = sh.worksheet('仕入先分析_単価')
-worksheet.clear()
-worksheet.update([result.columns.tolist()] + result.values.tolist(), value_input_option='RAW')
-
-# 書式設定（枠線・ヘッダー固定）
 sheet_id = worksheet.id
+
+# フィルター解除 → クリア → 書き込み（フィルター残存によるズレを防ぐ）
+sh.batch_update({'requests': [{"clearBasicFilter": {"sheetId": sheet_id}}]})
+worksheet.clear()
+set_with_dataframe(worksheet, result, include_index=False, include_column_header=True)
 num_rows, num_cols = result.shape
 high_idx = result.columns.get_loc('最高単価日')
 low_idx = result.columns.get_loc('最安単価')

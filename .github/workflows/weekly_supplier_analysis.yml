@@ -1,7 +1,7 @@
 name: Weekly Supplier Analysis
 on:
   schedule:
-    - cron: '0 10 * * 5' # 金曜日 24:00 JST (UTC 15:00)
+    - cron: '0 15 * * 5' # 金曜日 24:00 JST (UTC 15:00)
   workflow_dispatch: # 手動実行ボタン
 jobs:
   run-supplier-analysis:
@@ -14,7 +14,7 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          pip install pandas numpy gspread google-auth google-cloud-bigquery db-dtypes pyarrow
+          pip install pandas numpy gspread gspread-dataframe google-auth google-cloud-bigquery db-dtypes pyarrow
       - name: Run supplier analysis
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
