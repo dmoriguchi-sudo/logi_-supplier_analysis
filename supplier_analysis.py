@@ -43,7 +43,7 @@ unit_col = "unitOfQuantity"
 df['invoiceDate_parsed'] = pd.to_datetime(df['invoiceDate'].astype(str), format='%Y%m%d', errors='coerce')
 max_date = df['invoiceDate_parsed'].max()
 
-# 直近14日間のデータ（ダミーコード除外）
+# 直近14日間のデータ（値引き・請求違い・調整金コード除外）
 EXCLUDE_CODES = {'9999997', '9999998', '9999999'}
 df_all = df[
     (df['invoiceDate_parsed'] >= max_date - timedelta(days=14)) &
