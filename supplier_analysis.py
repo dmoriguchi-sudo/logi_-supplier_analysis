@@ -122,9 +122,16 @@ result = pd.DataFrame(result_rows)
 # ★ ここで商品コード(A列相当)で昇順に並べ替え ★
 result = result.sort_values('商品コード').fillna('')
 
-# 列の並びを整理
+# 列の並びを整理（仕入先を数値順・サフィックス順にソート）
+import re
+def _supplier_sort_key(col):
+    m = re.match(r'仕入先(\d+)(.*)', col)
+    if not m:
+        return (999, 0)
+    return (int(m.group(1)), {'': 0, '_単価': 1, '_取引回数': 2}.get(m.group(2), 99))
+
 base_cols = ['商品コード', '商品名', '仕入れ単位', '最高単価日', '最高単価', '最安単価日', '最安単価', '平均単価', '短期トレンド']
-supplier_cols = sorted([c for c in result.columns if c.startswith('仕入先')])
+supplier_cols = sorted([c for c in result.columns if c.startswith('仕入先')], key=_supplier_sort_key)
 result = result[base_cols + supplier_cols]
 
 # ============================================================
